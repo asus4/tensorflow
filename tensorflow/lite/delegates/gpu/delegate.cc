@@ -92,6 +92,14 @@ class Delegate {
   int MaxDelegatedPartitions() const {
     return options_.max_delegated_partitions;
   }
+
+  void BindInputBuffer(uint32_t index, GLuint ssbo_id) {
+    external_input_buffers_[index] = ssbo_id;
+  }
+  void BindOutputBuffer(uint32_t index, GLuint ssbo_id) {
+    external_output_buffers_[index] = ssbo_id;
+  }
+
   int num_delegate_kernels() const { return num_delegate_kernels_; }
 
  private:
@@ -106,6 +114,15 @@ class Delegate {
 
   TfLiteGpuDelegateOptionsV2 options_;
   int num_delegate_kernels_ = 0;
+  std::map<uint32_t, GLuint> external_input_buffers_;
+  std::map<uint32_t, GLuint> external_output_buffers_;
+
+  bool HasExternalInputBuffer(int index) {
+    return external_input_buffers_.count(index) > 0;
+  }
+  bool HasExternalOutputBuffer(int index) {
+    return external_output_buffers_.count(index) > 0;
+  }
 
   friend class DelegateKernel;
 };
@@ -127,8 +144,16 @@ class DelegateKernel {
     GraphFloat32 graph;
     std::vector<uint32_t> input_refs;
     std::vector<uint32_t> output_refs;
+    std::vector<BHWC> input_shapes;
+    std::vector<BHWC> output_shapes;
     RETURN_IF_ERROR(InitializeGraph(context, delegate_params, &graph,
                                     &input_refs, &output_refs));
+    for (const auto& input : graph.inputs()) {
+      input_shapes.push_back(input->tensor.shape);
+    }
+    for (const auto& output : graph.outputs()) {
+      output_shapes.push_back(output->tensor.shape);
+    }
 
     std::unique_ptr<InferenceBuilder> builder;
     bool graph_is_destroyed;
@@ -163,15 +188,23 @@ class DelegateKernel {
     for (uint32_t tensor_index : input_refs) {
       const int64_t object_index = input_indices_.size();
       input_indices_.push_back(tensor_index);
-      RETURN_IF_ERROR(
-          builder->SetInputObjectDef(object_index, GetObjectDef(tensor_index)));
+
+      bool is_external = delegate_->HasExternalInputBuffer(object_index);
+      const ObjectDef& object_def = is_external
+        ? GetGpuObjectDef(input_shapes[object_index].c)
+        : GetObjectDef(tensor_index);
+      RETURN_IF_ERROR(builder->SetInputObjectDef(object_index, object_def));
     }
     output_indices_.reserve(output_refs.size());
     for (uint32_t tensor_index : output_refs) {
       const int64_t object_index = output_indices_.size();
       output_indices_.push_back(tensor_index);
-      RETURN_IF_ERROR(builder->SetOutputObjectDef(object_index,
-                                                  GetObjectDef(tensor_index)));
+
+      bool is_external = delegate_->HasExternalOutputBuffer(object_index);
+      const ObjectDef& object_def = is_external
+        ? GetGpuObjectDef(input_shapes[object_index].c)
+        : GetObjectDef(tensor_index);
+      RETURN_IF_ERROR(builder->SetOutputObjectDef(object_index, object_def));
     }
 
     return builder->Build(&runner_);
@@ -229,12 +262,31 @@ class DelegateKernel {
  private:
   absl::Status SetInputsAndOutputs(TfLiteContext* context) {
     for (int i = 0; i < input_indices_.size(); ++i) {
-      RETURN_IF_ERROR(runner_->SetInputObject(
-          i, GetTensorObject(input_indices_[i], context)));
+      bool is_external = delegate_->HasExternalInputBuffer(i);
+      if (is_external)
+      {
+        OpenGlBuffer buffer;
+        buffer.id = delegate_->external_input_buffers_[i];
+        RETURN_IF_ERROR(runner_->SetInputObject(i, buffer));
+      }
+      else {
+        RETURN_IF_ERROR(runner_->SetInputObject(
+            i, GetTensorObject(input_indices_[i], context)));
+      }
     }
+
     for (int i = 0; i < output_indices_.size(); ++i) {
-      RETURN_IF_ERROR(runner_->SetOutputObject(
-          i, GetTensorObject(output_indices_[i], context)));
+      bool is_external = delegate_->HasExternalOutputBuffer(i);
+      if (is_external)
+      {
+        OpenGlBuffer buffer;
+        buffer.id = delegate_->external_output_buffers_[i];
+        RETURN_IF_ERROR(runner_->SetOutputObject(i, buffer));
+      }
+      else {
+        RETURN_IF_ERROR(runner_->SetOutputObject(
+            i, GetTensorObject(output_indices_[i], context)));
+      }
     }
     return absl::OkStatus();
   }
@@ -246,6 +298,17 @@ class DelegateKernel {
     default_object_def.object_type = ObjectType::CPU_MEMORY;
     default_object_def.user_provided = true;
     return default_object_def;
+  }
+
+  ObjectDef GetGpuObjectDef(int channels) const { 
+    ObjectDef gpu_object_def;
+    gpu_object_def.data_type = DataType::FLOAT32;
+    gpu_object_def.data_layout = channels == 4
+      ? DataLayout::DHWC4
+      : DataLayout::BHWC;
+    gpu_object_def.object_type = ObjectType::OPENGL_SSBO;
+    gpu_object_def.user_provided = true;
+    return gpu_object_def;
   }
 
   TensorObject GetTensorObject(int index, TfLiteContext* context) const {
@@ -464,4 +527,24 @@ TfLiteDelegate* TfLiteGpuDelegateV2Create(
 
 void TfLiteGpuDelegateV2Delete(TfLiteDelegate* delegate) {
   delete tflite::gpu::GetDelegate(delegate);
+}
+
+TfLiteStatus TfLiteGpuDelegateV2BindInputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer) {
+  auto* gpu_delegate = tflite::gpu::GetDelegate(delegate);
+  if (!gpu_delegate) {
+    return kTfLiteDelegateError;
+  }
+  gpu_delegate->BindInputBuffer(index, buffer);
+  return kTfLiteOk;
+}
+
+TfLiteStatus TfLiteGpuDelegateV2BindOutputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer) {
+  auto* gpu_delegate = tflite::gpu::GetDelegate(delegate);
+  if (!gpu_delegate) {
+    return kTfLiteDelegateError;
+  }
+  gpu_delegate->BindOutputBuffer(index, buffer);
+  return kTfLiteOk;
 }

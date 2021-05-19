@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_DELEGATES_GPU_DELEGATE_H_
 #define TENSORFLOW_LITE_DELEGATES_GPU_DELEGATE_H_
 
+#include <GLES3/gl31.h>
 #include <stdint.h>
 
 #include "tensorflow/lite/c/common.h"
@@ -125,6 +126,18 @@ TFL_CAPI_EXPORT TfLiteDelegate* TfLiteGpuDelegateV2Create(
 
 // Destroys a delegate created with `TfLiteGpuDelegateV2Create` call.
 TFL_CAPI_EXPORT void TfLiteGpuDelegateV2Delete(TfLiteDelegate* delegate);
+
+// Binds GL shader storage object to an input in the initialized
+// delegate. Bound buffer should have sufficient storage to accommodate
+// all elements of a tensor.
+TFL_CAPI_EXPORT TfLiteStatus TfLiteGpuDelegateV2BindInputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer);
+
+// Binds GL shader storage object to an output in the initialized
+// delegate. Bound buffer should have sufficient storage to accommodate
+// all elements of a tensor.
+TFL_CAPI_EXPORT TfLiteStatus TfLiteGpuDelegateV2BindOutputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer);
 
 #ifdef __cplusplus
 }
