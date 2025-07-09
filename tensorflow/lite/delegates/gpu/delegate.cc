@@ -279,18 +279,29 @@ class Delegate {
   }
 
   bool HasExternalInputBuffer(int index) const {
-    return external_input_buffers_.count(index) > 0;
+    return external_input_buffers_.contains(index);
   }
   bool HasExternalOutputBuffer(int index) const {
-    return external_output_buffers_.count(index) > 0;
+    return external_output_buffers_.contains(index);
   }
 
-  const absl::flat_hash_map<uint32_t, GLuint>& external_input_buffers() const {
-    return external_input_buffers_;
+  GLuint GetExternalInputBuffer(int index) const {
+    auto it = external_input_buffers_.find(index);
+    if (it != external_input_buffers_.end()) {
+      return it->second;
+    }
+    TFLITE_LOG(TFLITE_LOG_WARNING, "No external input buffer for index %d", index);
+    return 0;
   }
-  const absl::flat_hash_map<uint32_t, GLuint>& external_output_buffers() const {
-    return external_output_buffers_;
+  GLuint GetExternalOutputBuffer(int index) const {
+    auto it = external_output_buffers_.find(index);
+    if (it != external_output_buffers_.end()) {
+      return it->second;
+    }
+    TFLITE_LOG(TFLITE_LOG_WARNING, "No external output buffer for index %d", index);
+    return 0;
   }
+
 
  private:
   TfLiteDelegate delegate_;
@@ -798,8 +809,8 @@ class DelegateKernel {
     for (int i = 0; i < core_.input_indices().size(); ++i) {
       bool is_external = delegate->HasExternalInputBuffer(i);
       if (is_external) {
-        OpenGlBuffer buffer = OpenGlBuffer(delegate->external_input_buffers().at(i));
-        RETURN_IF_ERROR(core_.runner()->SetInputObject(i, buffer));
+        OpenGlBuffer buffer = OpenGlBuffer(delegate->GetExternalInputBuffer(i));
+        RETURN_IF_ERROR(core_.runner()->SetInputObject(i, std::move(buffer)));
       } else {
         RETURN_IF_ERROR(core_.runner()->SetInputObject(
             i, GetTensorObject(core_.input_indices()[i], context)));
@@ -808,8 +819,8 @@ class DelegateKernel {
     for (int i = 0; i < core_.output_indices().size(); ++i) {
       bool is_external = delegate->HasExternalOutputBuffer(i);
       if (is_external) {
-        OpenGlBuffer buffer = OpenGlBuffer(delegate->external_output_buffers().at(i));
-        RETURN_IF_ERROR(core_.runner()->SetOutputObject(i, buffer));
+        OpenGlBuffer buffer = OpenGlBuffer(delegate->GetExternalOutputBuffer(i));
+        RETURN_IF_ERROR(core_.runner()->SetOutputObject(i, std::move(buffer)));
       } else {
         RETURN_IF_ERROR(core_.runner()->SetOutputObject(
             i, GetTensorObject(core_.output_indices()[i], context)));
