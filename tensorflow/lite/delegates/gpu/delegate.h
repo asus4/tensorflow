@@ -54,6 +54,19 @@ TFL_CAPI_EXPORT TfLiteDelegate* tflite_plugin_create_delegate(
 
 TFL_CAPI_EXPORT void tflite_plugin_destroy_delegate(TfLiteDelegate* delegate);
 
+typedef uint32_t GLuint;
+// Binds GL shader storage object to an input in the initialized
+// delegate. Bound buffer should have sufficient storage to accommodate
+// all elements of a tensor.
+TFL_CAPI_EXPORT TfLiteStatus TfLiteGpuDelegateV2BindInputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer);
+
+// Binds GL shader storage object to an output in the initialized
+// delegate. Bound buffer should have sufficient storage to accommodate
+// all elements of a tensor.
+TFL_CAPI_EXPORT TfLiteStatus TfLiteGpuDelegateV2BindOutputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer);
+
 #ifdef __cplusplus
 }
 #endif  // __cplusplus

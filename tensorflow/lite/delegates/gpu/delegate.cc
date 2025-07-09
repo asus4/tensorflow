@@ -271,6 +271,27 @@ class Delegate {
     return telemetry_settings_.get();
   }
 
+  void BindInputBuffer(uint32_t index, GLuint ssbo_id) {
+    external_input_buffers_[index] = ssbo_id;
+  }
+  void BindOutputBuffer(uint32_t index, GLuint ssbo_id) {
+    external_output_buffers_[index] = ssbo_id;
+  }
+
+  bool HasExternalInputBuffer(int index) const {
+    return external_input_buffers_.count(index) > 0;
+  }
+  bool HasExternalOutputBuffer(int index) const {
+    return external_output_buffers_.count(index) > 0;
+  }
+
+  const absl::flat_hash_map<uint32_t, GLuint>& external_input_buffers() const {
+    return external_input_buffers_;
+  }
+  const absl::flat_hash_map<uint32_t, GLuint>& external_output_buffers() const {
+    return external_output_buffers_;
+  }
+
  private:
   TfLiteDelegate delegate_;
   TfLiteGpuDelegateOptionsV2 options_;
@@ -281,6 +302,9 @@ class Delegate {
   std::unique_ptr<TfLiteTelemetryGpuDelegateSettings> telemetry_settings_;
 
   bool async_;
+
+  absl::flat_hash_map<uint32_t, GLuint> external_input_buffers_;
+  absl::flat_hash_map<uint32_t, GLuint> external_output_buffers_;
 
   friend class DelegateKernelCore;
 #if defined(__ANDROID__)
@@ -315,6 +339,8 @@ class DelegateKernelCore {
 
   absl::Status Setup(TfLiteContext* context,
                      const TfLiteDelegateParams* delegate_params);
+
+  Delegate* delegate() const { return delegate_; }
 
  private:
   ObjectDef GetObjectDef(int index,
@@ -371,6 +397,17 @@ class DelegateKernelCore {
   bool enforce_same_thread_ = false;  // flag to enforce same thread for Invoke
 
   std::unique_ptr<TfLiteTelemetryGpuDelegateSettings> telemetry_settings_;
+
+  ObjectDef GetGpuObjectDef(int channels) const {
+    ObjectDef gpu_object_def;
+    gpu_object_def.data_type = DataType::FLOAT32;
+    gpu_object_def.data_layout = channels == 4
+      ? DataLayout::DHWC4
+      : DataLayout::BHWC;
+    gpu_object_def.object_type = ObjectType::OPENGL_SSBO;
+    gpu_object_def.user_provided = true;
+    return gpu_object_def;
+  }
 };
 
 ObjectDef DelegateKernelCore::GetObjectDef(int index,
@@ -452,6 +489,16 @@ absl::Status DelegateKernelCore::Setup(
   RETURN_IF_ERROR(InitializeGraph(context, delegate_params, &graph, &input_refs,
                                   &output_refs));
 
+  // Store input and output shapes for external buffer handling
+  std::vector<BHWC> input_shapes;
+  std::vector<BHWC> output_shapes;
+  for (const auto& input : graph.inputs()) {
+    input_shapes.push_back(input->tensor.shape);
+  }
+  for (const auto& output : graph.outputs()) {
+    output_shapes.push_back(output->tensor.shape);
+  }
+
   std::unique_ptr<InferenceBuilder> builder;
   bool graph_is_destroyed;
   bool backend_opencl = false;
@@ -500,8 +547,11 @@ absl::Status DelegateKernelCore::Setup(
     input_indices_.push_back(tensor_index);
     const TfLiteTensor& tflite_tensor = context->tensors[tensor_index];
     const DataType data_type = ToDataType(tflite_tensor.type);
-    RETURN_IF_ERROR(builder->SetInputObjectDef(
-        object_index, GetObjectDef(tensor_index, data_type)));
+    bool is_external = delegate_->HasExternalInputBuffer(object_index);
+    const ObjectDef& object_def = is_external
+        ? GetGpuObjectDef(input_shapes[object_index].c)
+        : GetObjectDef(tensor_index, data_type);
+    RETURN_IF_ERROR(builder->SetInputObjectDef(object_index, object_def));
   }
   output_indices_.reserve(output_refs.size());
   for (uint32_t tensor_index : output_refs) {
@@ -509,8 +559,11 @@ absl::Status DelegateKernelCore::Setup(
     output_indices_.push_back(tensor_index);
     const TfLiteTensor& tflite_tensor = context->tensors[tensor_index];
     const DataType data_type = ToDataType(tflite_tensor.type);
-    RETURN_IF_ERROR(builder->SetOutputObjectDef(
-        object_index, GetObjectDef(tensor_index, data_type)));
+    bool is_external = delegate_->HasExternalOutputBuffer(object_index);
+    const ObjectDef& object_def = is_external
+        ? GetGpuObjectDef(output_shapes[object_index].c)
+        : GetObjectDef(tensor_index, data_type);
+    RETURN_IF_ERROR(builder->SetOutputObjectDef(object_index, object_def));
   }
 
   return builder->Build(&runner_);
@@ -741,13 +794,26 @@ class DelegateKernel {
 
  private:
   absl::Status SetInputsAndOutputs(TfLiteContext* context) {
+    Delegate* delegate = core_.delegate();
     for (int i = 0; i < core_.input_indices().size(); ++i) {
-      RETURN_IF_ERROR(core_.runner()->SetInputObject(
-          i, GetTensorObject(core_.input_indices()[i], context)));
+      bool is_external = delegate->HasExternalInputBuffer(i);
+      if (is_external) {
+        OpenGlBuffer buffer = OpenGlBuffer(delegate->external_input_buffers().at(i));
+        RETURN_IF_ERROR(core_.runner()->SetInputObject(i, buffer));
+      } else {
+        RETURN_IF_ERROR(core_.runner()->SetInputObject(
+            i, GetTensorObject(core_.input_indices()[i], context)));
+      }
     }
     for (int i = 0; i < core_.output_indices().size(); ++i) {
-      RETURN_IF_ERROR(core_.runner()->SetOutputObject(
-          i, GetTensorObject(core_.output_indices()[i], context)));
+      bool is_external = delegate->HasExternalOutputBuffer(i);
+      if (is_external) {
+        OpenGlBuffer buffer = OpenGlBuffer(delegate->external_output_buffers().at(i));
+        RETURN_IF_ERROR(core_.runner()->SetOutputObject(i, buffer));
+      } else {
+        RETURN_IF_ERROR(core_.runner()->SetOutputObject(
+            i, GetTensorObject(core_.output_indices()[i], context)));
+      }
     }
     return absl::OkStatus();
   }
@@ -1617,4 +1683,24 @@ TfLiteDelegate* tflite_plugin_create_delegate(
 
 void tflite_plugin_destroy_delegate(TfLiteDelegate* delegate) {
   TfLiteGpuDelegateV2Delete(delegate);
+}
+
+TfLiteStatus TfLiteGpuDelegateV2BindInputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer) {
+  auto* gpu_delegate = tflite::gpu::GetDelegate(delegate);
+  if (!gpu_delegate) {
+    return kTfLiteError;
+  }
+  gpu_delegate->BindInputBuffer(index, buffer);
+  return kTfLiteOk;
+}
+
+TfLiteStatus TfLiteGpuDelegateV2BindOutputBuffer(
+  TfLiteDelegate* delegate, int index, GLuint buffer) {
+  auto* gpu_delegate = tflite::gpu::GetDelegate(delegate);
+  if (!gpu_delegate) {
+    return kTfLiteError;
+  }
+  gpu_delegate->BindOutputBuffer(index, buffer);
+  return kTfLiteOk;
 }
